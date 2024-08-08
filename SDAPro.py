@@ -1,9 +1,21 @@
 import numpy as np
 import pandas as pd
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 from sklearn.linear_model import LinearRegression
 import openpyxl
+
+def read_and_merge_sheets(file_path):
+    # قراءة ملف إكسل
+    xls = pd.ExcelFile(file_path)
+    
+    # قراءة جميع أوراق العمل وتحويلها إلى DataFrames
+    dfs = [pd.read_excel(xls, sheet_name) for sheet_name in xls.sheet_names]
+    
+    # دمج جميع DataFrames في DataFrame واحد
+    merged_df = pd.concat(dfs, ignore_index=True)
+    
+    return merged_df
 
 def convert_sales_date(df):
     if 'sales date' not in df.columns:
@@ -15,10 +27,16 @@ def convert_sales_date(df):
         return None
     return df
 
-def calculate_days_of_sales(df, forecast_date):
+def calculate_days_of_sales(file_path, start_date, end_date):
+    # قراءة جميع الشيتات ودمجها
+    df = read_and_merge_sheets(file_path)
+    
+    # تحويل عمود تاريخ المبيعات
     df = convert_sales_date(df)
     if df is None:
         return None
+    
+    # التحقق من وجود الأعمدة المطلوبة
     if 'code' not in df.columns:
         st.warning("'code' column not found in the Excel file.")
         return None
@@ -29,11 +47,14 @@ def calculate_days_of_sales(df, forecast_date):
         st.warning("'quy sale' column not found in the Excel file.")
         return None
 
+    # تجميع البيانات حسب الكود
     grouped = df.groupby('code')
     result = {}
     forecast_results = {}
     item_names = {}
     total_sales = {}
+    
+    # تحليل البيانات
     for code, group in grouped:
         unique_dates = group['sales date'].dt.date.unique()
         result[code] = len(unique_dates)
@@ -51,14 +72,23 @@ def calculate_days_of_sales(df, forecast_date):
         model = LinearRegression()
         model.fit(X, y)
 
-        forecast_value = model.predict([[forecast_date.toordinal()]])[0]
-        forecast_results[code] = max(0, forecast_value)
+        # حساب الـ forecast للفترة الزمنية المحددة
+        forecast_values = []
+        current_date = start_date
+        while current_date <= end_date:
+            forecast_value = model.predict([[current_date.toordinal()]])[0]
+            forecast_values.append(max(0, forecast_value))
+            current_date += timedelta(days=1)
+        
+        forecast_results[code] = sum(forecast_values)
 
+    # إنشاء DataFrame للنتائج النهائية
     days_of_sales_df = pd.DataFrame(list(result.items()), columns=['code', 'days_of_sales'])
     forecast_df = pd.DataFrame(list(forecast_results.items()), columns=['code', 'forecast'])
     item_names_df = pd.DataFrame(list(item_names.items()), columns=['code', 'item name'])
     total_sales_df = pd.DataFrame(list(total_sales.items()), columns=['code', 'total sales'])
 
+    # دمج النتائج
     merged_df = days_of_sales_df.merge(item_names_df, on='code').merge(total_sales_df, on='code').merge(forecast_df, on='code')
     return merged_df[['code', 'item name', 'days_of_sales', 'total sales', 'forecast']]
 
@@ -101,15 +131,21 @@ def main():
 
     if file is not None:
         try:
-            df = pd.read_excel(file)
+            # حفظ الملف المحمل إلى مسار
+            with open("uploaded_file.xlsx", "wb") as f:
+                f.write(file.getbuffer())
+            
+            file_path = "uploaded_file.xlsx"
+            
         except Exception as e:
             st.warning(f"An error occurred while loading the Excel file: {str(e)}")
             return
 
         if selected_option == "NDS Forcast":
             try:
-                forecast_date = st.date_input("Enter Forecast Date")
-                df_processed = calculate_days_of_sales(df, forecast_date)
+                start_date = st.date_input("Enter Start Date")
+                end_date = st.date_input("Enter End Date")
+                df_processed = calculate_days_of_sales(file_path, start_date, end_date)
                 if df_processed is not None:
                     st.write(df_processed)
             except KeyError as e:
@@ -121,6 +157,8 @@ def main():
 
             if st.button("Process SDS"):
                 try:
+                    # قراءة جميع الشيتات ودمجها
+                    df = read_and_merge_sheets(file_path)
                     df_processed = calculate_SDS(df, sales_duration, storage_duration)
                     st.write(df_processed)
                 except KeyError as e:
