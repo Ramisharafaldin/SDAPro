@@ -1,5 +1,7 @@
 numpy
 pandas
 streamlit
-scikit-learn
+datetime
 openpyxl
+statsmodels
+io
