@@ -3,113 +3,75 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
 from sklearn.linear_model import LinearRegression
-import openpyxl
+from io import BytesIO
 
-def read_and_merge_sheets(file_path):
-    # قراءة ملف إكسل
-    xls = pd.ExcelFile(file_path)
+# Function to process sales data from all sheets
+def process_all_sheets(file):
+    # Read all sheets from the file
+    dataframes = pd.read_excel(file, sheet_name=None)
     
-    # قراءة جميع أوراق العمل وتحويلها إلى DataFrames
-    dfs = [pd.read_excel(xls, sheet_name) for sheet_name in xls.sheet_names]
-    
-    # دمج جميع DataFrames في DataFrame واحد
-    merged_df = pd.concat(dfs, ignore_index=True)
-    
-    return merged_df
+    # Combine all sheets into one DataFrame
+    all_data = pd.DataFrame()
+    for sheet_name, df in dataframes.items():
+        df['Sheet Name'] = sheet_name  # Add a column to identify the sheet
+        all_data = pd.concat([all_data, df], ignore_index=True)
 
-def convert_sales_date(df):
-    if 'sales date' not in df.columns:
-        st.warning("'sales date' column not found in the Excel file.")
-        return None
-    df['sales date'] = pd.to_datetime(df['sales date'], errors='coerce')
-    if df['sales date'].isnull().any():
-        st.warning("Some 'sales date' entries could not be converted to datetime.")
-        return None
-    return df
+    # Convert the sales date column to datetime format
+    all_data['sales date'] = pd.to_datetime(all_data['sales date'], format='%d-%m-%y', errors='coerce')
 
-def calculate_days_of_sales(file_path, start_date, end_date):
-    # قراءة جميع الشيتات ودمجها
-    df = read_and_merge_sheets(file_path)
-    
-    # تحويل عمود تاريخ المبيعات
-    df = convert_sales_date(df)
-    if df is None:
-        return None
-    
-    # التحقق من وجود الأعمدة المطلوبة
-    if 'code' not in df.columns:
-        st.warning("'code' column not found in the Excel file.")
-        return None
-    if 'item name' not in df.columns:
-        st.warning("'item name' column not found in the Excel file.")
-        return None
-    if 'quy sale' not in df.columns:
-        st.warning("'quy sale' column not found in the Excel file.")
-        return None
+    # Check for missing columns
+    required_columns = ['sales date', 'quy sales', 'code', 'item name']
+    for col in required_columns:
+        if col not in all_data.columns:
+            raise KeyError(f"Missing required column: {col}")
 
-    # تجميع البيانات حسب الكود
-    grouped = df.groupby('code')
-    result = {}
-    forecast_results = {}
-    item_names = {}
-    total_sales = {}
-    
-    # تحليل البيانات
-    for code, group in grouped:
-        unique_dates = group['sales date'].dt.date.unique()
-        result[code] = len(unique_dates)
-        item_names[code] = group['item name'].iloc[0]
-        total_sales[code] = group['quy sale'].sum()
+    # Remove rows with invalid dates
+    invalid_dates_count = all_data['sales date'].isna().sum()
+    all_data = all_data.dropna(subset=['sales date'])
 
-        sales_counts = group.groupby('sales date')['quy sale'].sum().reset_index()
-        if sales_counts.empty:
-            st.warning(f"No sales data found for code: {code}")
-            continue
+    if invalid_dates_count > 0:
+        st.warning(f"{invalid_dates_count} rows were removed due to invalid dates.")
 
-        sales_counts['sales date'] = sales_counts['sales date'].map(datetime.toordinal)
-        X = sales_counts['sales date'].values.reshape(-1, 1)
-        y = sales_counts['quy sale'].values
-        model = LinearRegression()
-        model.fit(X, y)
+    # Calculate general metrics
+    unique_sales_days = all_data['sales date'].nunique()
+    number_of_sales_transactions = all_data.shape[0]
+    total_quantity_sold = all_data['quy sales'].sum()
 
-        # حساب الـ forecast للفترة الزمنية المحددة
-        forecast_values = []
-        current_date = start_date
-        while current_date <= end_date:
-            forecast_value = model.predict([[current_date.toordinal()]])[0]
-            forecast_values.append(max(0, forecast_value))
-            current_date += timedelta(days=1)
-        
-        forecast_results[code] = sum(forecast_values)
+    # Create a DataFrame for general results
+    results = {
+        'Sales Days': unique_sales_days,
+        'Sales Transactions': number_of_sales_transactions,
+        'Total Quantity Sold': total_quantity_sold
+    }
+    results_df = pd.DataFrame([results])
 
-    # إنشاء DataFrame للنتائج النهائية
-    days_of_sales_df = pd.DataFrame(list(result.items()), columns=['code', 'days_of_sales'])
-    forecast_df = pd.DataFrame(list(forecast_results.items()), columns=['code', 'forecast'])
-    item_names_df = pd.DataFrame(list(item_names.items()), columns=['code', 'item name'])
-    total_sales_df = pd.DataFrame(list(total_sales.items()), columns=['code', 'total sales'])
+    # Aggregate data by item
+    results_by_item = all_data.groupby(['code', 'item name'])['quy sales'].sum().reset_index()
+    results_by_item['Sales Transactions'] = all_data.groupby(['code', 'item name'])['sales date'].count().values
+    results_by_item['Sales Days'] = all_data.groupby(['code', 'item name'])['sales date'].nunique().values
 
-    # دمج النتائج
-    merged_df = days_of_sales_df.merge(item_names_df, on='code').merge(total_sales_df, on='code').merge(forecast_df, on='code')
-    return merged_df[['code', 'item name', 'days_of_sales', 'total sales', 'forecast']]
+    return results_df, results_by_item, all_data
 
+# Function to calculate required quantity
 def calculate_required_quantity(df, sales_duration, storage_duration):
-    if 'quy sale' not in df.columns or 'quy' not in df.columns or 'nds' not in df.columns:
-        raise KeyError("'quy sale', 'quy', and 'nds' columns are required in the input data")
+    if 'quy sales' not in df.columns or 'quy' not in df.columns or 'nds' not in df.columns:
+        raise KeyError("'quy sales', 'quy', and 'nds' columns are required in the input data")
 
-    daily_sales = df['quy sale'] / sales_duration
+    daily_sales = df['quy sales'] / sales_duration
     required_quantity = daily_sales * storage_duration - df['quy']
     df['Required Quantity'] = np.where(required_quantity > 0, required_quantity, np.nan)
 
     return df
 
+# Function to calculate SDS
 def calculate_SDS(df, sales_duration, storage_duration):
-    required_columns = ['quy', 'quy sale', 'nds', 'total sales']
+    required_columns = ['quy', 'quy sales', 'nds', 'total sales']
     for col in required_columns:
         if col not in df.columns:
             raise KeyError(f"'{col}' column is missing in the input data")
 
-    df['Turnover'] = np.where(df['quy'] != 0, (df['quy sale'] / df['quy']).round(1), 'o.s')
-    df['Daily Sales'] = np.where(df['quy sale'] != 0, (df['quy sale'] / df['nds']).round(1), 0)
+    df['Turnover'] = np.where(df['quy'] != 0, (df['quy sales'] / df['quy']).round(1), 'o.s')
+    df['Daily Sales'] = np.where(df['quy sales'] != 0, (df['quy sales'] / df['nds']).round(1), 0)
     df['Days of Inventory'] = np.where(df['Daily Sales'] != 0, (df['quy'] / df['Daily Sales']).apply(lambda x: f"{int(x)}D" if not np.isinf(x) and not np.isnan(x) else 'inf'), '0D')
     df['Days of Inventory'] = df['Days of Inventory'].replace('inf', '9999999999.1D').replace('0D', '0.1D')
 
@@ -123,46 +85,71 @@ def calculate_SDS(df, sales_duration, storage_duration):
 
     return df
 
+# Streamlit interface
 def main():
     st.title("SDAPro System")
-    selected_option = st.selectbox("Select Option", ("NDS Forcast", "SDS Stok"))
+    
+    # تعديل القائمة المنسدلة
+    selected_option = st.selectbox("Select Option", ("Sales Data Analysis", "Stock Control"))
 
-    file = st.file_uploader("Upload Excel file", type=['xlsx'])
-
-    if file is not None:
+    file = st.file_uploader("Upload Excel File", type=["xlsx"])
+    if file:
         try:
-            # حفظ الملف المحمل إلى مسار
+            # Save the uploaded file to a path
             with open("uploaded_file.xlsx", "wb") as f:
                 f.write(file.getbuffer())
             
             file_path = "uploaded_file.xlsx"
             
+            if selected_option == "Sales Data Analysis":
+                if st.button("RUN"):  # تغيير اسم الزر إلى RUN
+                    try:
+                        # Process data using the new function
+                        results_df, results_by_item, all_data = process_all_sheets(file_path)
+
+                        # Display general results
+                        st.subheader("General Metrics")
+                        st.dataframe(results_df)
+
+                        # Display detailed results by item
+                        st.subheader("Results by Item")
+                        st.dataframe(results_by_item)
+
+                        # Display combined data
+                        st.subheader("Combined Data")
+                        st.dataframe(all_data)
+
+                        # Save results to an Excel file
+                        output = BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            results_df.to_excel(writer, sheet_name="Summary", index=False)
+                            results_by_item.to_excel(writer, sheet_name="Item Analysis", index=False)
+                            all_data.to_excel(writer, sheet_name="All Data", index=False)
+                        output.seek(0)
+
+                        st.download_button(
+                            label="Download Results (Excel)",
+                            data=output,
+                            file_name="analysis_results.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+                    except Exception as e:
+                        st.error(f"An error occurred while processing the file: {e}")
+
+            elif selected_option == "Stock Control":
+                sales_duration = st.number_input("Enter Sales Duration (days):")
+                storage_duration = st.number_input("Enter Storage Duration (days):")
+                if st.button("RUN"):  # تغيير اسم الزر إلى RUN
+                    try:
+                        df = pd.read_excel(file_path)
+                        df_processed = calculate_SDS(df, sales_duration, storage_duration)
+                        st.write(df_processed)
+                    except KeyError as e:
+                        st.warning(str(e))
+
         except Exception as e:
             st.warning(f"An error occurred while loading the Excel file: {str(e)}")
             return
-
-        if selected_option == "NDS Forcast":
-            try:
-                start_date = st.date_input("Enter Start Date")
-                end_date = st.date_input("Enter End Date")
-                df_processed = calculate_days_of_sales(file_path, start_date, end_date)
-                if df_processed is not None:
-                    st.write(df_processed)
-            except KeyError as e:
-                st.warning(str(e))
-
-        elif selected_option == "SDS Stok":
-            sales_duration = st.number_input("Enter Sales Duration (days):")
-            storage_duration = st.number_input("Enter Storage Duration (days):")
-
-            if st.button("Process SDS"):
-                try:
-                    # قراءة جميع الشيتات ودمجها
-                    df = read_and_merge_sheets(file_path)
-                    df_processed = calculate_SDS(df, sales_duration, storage_duration)
-                    st.write(df_processed)
-                except KeyError as e:
-                    st.warning(str(e))
 
 if __name__ == "__main__":
     main()
