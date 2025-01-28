@@ -1,7 +1,7 @@
-numpy
 pandas
+numpy
 streamlit
-datetime
 openpyxl
-statsmodels
-io
+scikit-learn
+prophet
+matplotlib
